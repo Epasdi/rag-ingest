@@ -58,4 +58,79 @@ def stable_point_id(text: str) -> int:
 
 # ========= Endpoints =========
 @app.get("/health")
-def he
+def health():
+    try:
+        _ = qdrant.get_collections()
+        return {"status": "ok"}
+    except Exception as e:
+        return JSONResponse(
+            {"status": "qdrant_unreachable", "error": str(e)}, status_code=503
+        )
+
+@app.post("/ingest")
+async def ingest_pdf(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        text = extract_text_from_pdf(tmp_path)
+        if not text.strip():
+            raise HTTPException(
+                status_code=400, detail="PDF has no extractable text (might be scanned)"
+            )
+
+        chunks = clean_and_split(text)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No chunks created from PDF")
+
+        embeddings = embedder.encode(chunks).tolist()
+        ensure_collection_exists()
+
+        points = [
+            PointStruct(
+                id=stable_point_id(chunk),
+                vector=emb,
+                payload={"text": chunk, "source": file.filename, "chunk_index": i},
+            )
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+        ]
+        qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
+
+        return {
+            "status": "success",
+            "chunks_inserted": len(points),
+            "source": file.filename,
+            "collection": COLLECTION_NAME,
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+@app.get("/search")
+def search(
+    q: str = Query(..., description="Consulta en lenguaje natural"),
+    top_k: int = Query(5, ge=1, le=50, description="Resultados a devolver"),
+):
+    vec = embedder.encode([q])[0].tolist()
+    ensure_collection_exists()
+
+    results = qdrant.search(
+        collection_name=COLLECTION_NAME,
+        query_vector=vec,
+        limit=top_k,
+    )
+    return [
+        {
+            "score": float(r.score),
+            "text": (r.payload or {}).get("text"),
+            "source": (r.payload or {}).get("source"),
+            "chunk_index": (r.payload or {}).get("chunk_index"),
+        }
+        for r in results
+    ]
