@@ -1,8 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 qdrant-client
 sentence-transformers
-torch
+torch         # si fijas torch vía índice CPU en Dockerfile, puedes omitirlo aquí
 pdfplumber
 python-multipart
 langchain
